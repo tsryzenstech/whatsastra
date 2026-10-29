@@ -1,0 +1,46 @@
+# Builds WhatsAstra and publishes it as a GitHub release on every change of the
+# app or of config.json (e.g. a new server address). When ASTRA_CLOUD_URL and
+# ASTRA_CLOUD_TOKEN are set (an admin session token of astra cloud), the new
+# version is also uploaded to Market, so phones get it as an update.
+name: release
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", "tools/**", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  whatsastra:
+    runs-on: ubuntu-24.04
+    env:
+      ASTRA_CLOUD_URL: ${{ vars.ASTRA_CLOUD_URL || 'http://34.155.86.153' }}
+      ASTRA_CLOUD_TOKEN: ${{ secrets.ASTRA_CLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: tsryzenstech/astra
+          path: astra
+          sparse-checkout: tools/apkgtool
+      - name: Build
+        run: python3 tools/build.py --astra astra --build-number ${{ github.run_number }}
+      - name: Read version
+        id: v
+        run: echo "version=$(python3 -c 'import json;print(json.load(open("dist/release.json"))["version"])')" >> "$GITHUB_OUTPUT"
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: WhatsAstra ${{ steps.v.outputs.version }}
+          files: |
+            dist/com.astra.whatsastra.apkg
+            dist/release.json
+      - name: Publish on astra cloud
+        if: env.ASTRA_CLOUD_TOKEN != ''
+        run: |
+          curl -fsS -X PUT --data-binary @dist/com.astra.whatsastra.apkg \
+               -H "Authorization: Bearer $ASTRA_CLOUD_TOKEN" \
+               "$ASTRA_CLOUD_URL/api/dev/apps/com.astra.whatsastra/versions?notes=WhatsAstra%20${{ steps.v.outputs.version }}"
