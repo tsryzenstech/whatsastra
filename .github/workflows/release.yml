@@ -1,5 +1,5 @@
-# Builds WhatsAstra and publishes it as a GitHub release on every change of the
-# app or of config.json (e.g. a new server address). When ASTRA_CLOUD_URL and
+# Builds WhatsAstra with the astraOS SDK (design check included) and publishes
+# it as a GitHub release on every change of the app. When ASTRA_CLOUD_URL and
 # ASTRA_CLOUD_TOKEN are set (an admin session token of astra cloud), the new
 # version is also uploaded to Market, so phones get it as an update.
 name: release
@@ -24,7 +24,11 @@ jobs:
         with:
           repository: tsryzenstech/astra
           path: astra
-          sparse-checkout: tools/apkgtool
+          sparse-checkout: |
+            sdk
+            tools/apkgtool
+            tools/i18n
+            tools/adu
       - name: Build
         run: python3 tools/build.py --astra astra --build-number ${{ github.run_number }}
       - name: Read version

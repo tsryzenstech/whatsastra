@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Builds dist/com.astra.whatsastra.apkg with astraOS's apkgtool.
+"""Builds dist/com.astra.whatsastra.apkg with the astraOS SDK (`astra build`:
+the design language check, then the package).
 
   python3 tools/build.py --astra ../astra [--build-number N]
 """
@@ -29,6 +30,6 @@ if args.build_number:
 json.dump(m, open(os.path.join(app_dir, "app.json"), "w", encoding="utf-8", newline="\n"), indent=4, ensure_ascii=False)
 os.makedirs(args.out, exist_ok=True)
 out = os.path.join(args.out, m["package"] + ".apkg")
-subprocess.run([sys.executable, os.path.join(args.astra, "tools", "apkgtool", "apkgtool.py"), "pack", app_dir, "-o", out], check=True)
+subprocess.run([sys.executable, os.path.join(args.astra, "sdk", "bin", "astra"), "build", app_dir, "-o", out], check=True)
 json.dump({"version": m["version"], "versionCode": m["versionCode"]}, open(os.path.join(args.out, "release.json"), "w"), indent=2)
 print(out, m["version"], m["versionCode"])
