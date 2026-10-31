@@ -31,6 +31,12 @@ jobs:
             tools/adu
       - name: Build
         run: python3 tools/build.py --astra astra --build-number ${{ github.run_number }}
+      # The built app is also an artifact of the workflow run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error
       - name: Read version
         id: v
         run: echo "version=$(python3 -c 'import json;print(json.load(open("dist/release.json"))["version"])')" >> "$GITHUB_OUTPUT"
