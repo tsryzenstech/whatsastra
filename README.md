@@ -6,36 +6,52 @@ from the system's own components (Astra.Controls), so it looks and behaves like
 the rest of the phone: light and dark mode, the user's text size, the system's
 navigation and sheets. No web page in a frame.
 
-- chats with search, unread counts and the last message
-- conversations: send and receive messages, read receipts
-- notifications for new messages
+- chats with search, archived chats, pinned chats, unread counts and profile photos
+- conversations: text, photos, videos, voice messages, audio and documents
+  (play, view, save to Files), replies, reactions, delete for everyone, read
+  receipts, group senders, older messages as you scroll
+- send text, replies and photos or videos from the phone
+- start a chat with a phone number
+- notifications for new messages, also with the app closed (one per chat)
 - link with a QR code, unlink from Settings
 
 ## How it reaches WhatsApp
 
-WhatsApp has no official API for personal accounts. WhatsApp's protocol runs on
-your astraOS server, in [OpenWA](https://github.com/rmyndharis/OpenWA) (MIT), next
-to [astra-cloud](https://github.com/tsryzenstech/astra-cloud), which gives each
-AstraID account its own WhatsApp session (`/api/app/com.astra.whatsastra/*`). The
-app calls it through astraOS (`Account.request`), signed in with the phone's
-AstraID: OpenWA is never exposed, and the app never sees a password or a key.
+WhatsApp's protocol runs **on the phone**, in WhatsAstra's background service
+(`service/`, Go): astraOS starts it with the phone, as WhatsAstra's own user,
+and keeps it running (app.json `"services"`). It links the phone to your
+WhatsApp as a companion device, like WhatsApp Web, through
+[whatsmeow](https://github.com/tulir/whatsmeow) (MPL-2.0): messages are end
+to end encrypted to the phone and pass through no other server. Chats and
+messages are kept in the app's data, in SQLite
+([modernc.org/sqlite](https://gitlab.com/cznic/sqlite), pure Go).
 
 ```
-WhatsAstra (QML, Astra.Controls) -> astrad (AstraID token) -> astra-cloud -> OpenWA -> WhatsApp
+WhatsAstra (QML, Astra.Controls) <-> whatsastra-service (127.0.0.1, token) <-> WhatsApp
+                                        \-> astrad: notifications
 ```
 
-**WhatsApp does not support this officially:** OpenWA uses reverse-engineered
-clients, and WhatsApp can restrict or ban an account linked this way. Use a
-number you can afford to lose. Messages pass through your server between
-WhatsApp's encryption and the phone: host it yourself.
+The service listens on 127.0.0.1 at the port and with the token it writes to
+`files/service.json`, which only WhatsAstra's user can read (the API is listed
+at the top of `service/main.go`). WhatsApp keeps no history for linked devices:
+what the main phone sends right after linking, and everything since, is what
+WhatsAstra shows.
+
+**WhatsApp does not support this officially:** whatsmeow speaks WhatsApp's
+protocol as reverse engineered by its authors, and WhatsApp can restrict or ban
+an account linked this way. Use a number you can afford to lose.
 
 WhatsAstra is not made by or affiliated with WhatsApp or Meta.
+
+Before 3.0 the protocol ran on the astraOS server (astra-cloud and OpenWA):
+that is no longer needed.
 
 ## Building and publishing
 
     python3 tools/build.py --astra ../astra
 
-The build runs `astra build` from the SDK: the design language check, then the
+It needs [Go](https://go.dev) 1.24 or newer: it builds the service for the
+phone (linux/arm64, static) into the app's `bin/`, then runs `astra build` from the SDK: the design language check, then the
 package (`dist/com.astra.whatsastra.apkg`). Open `app/` in
 [Astra Studio](https://github.com/tsryzenstech/astra-studio) to edit it with the
 live preview.

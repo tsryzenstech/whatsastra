@@ -6,7 +6,7 @@ name: release
 on:
   push:
     branches: [main]
-    paths: ["app/**", "tools/**", ".github/workflows/release.yml"]
+    paths: ["app/**", "service/**", "tools/**", ".github/workflows/release.yml"]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,10 @@ jobs:
             tools/apkgtool
             tools/i18n
             tools/adu
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: service/go.mod
+          cache-dependency-path: service/go.sum
       - name: Build
         run: python3 tools/build.py --astra astra --build-number ${{ github.run_number }}
       # The built app is also an artifact of the workflow run.

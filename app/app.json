@@ -1,11 +1,11 @@
 {
     "package": "com.astra.whatsastra",
     "name": "WhatsAstra",
-    "version": "2.0.0",
-    "versionCode": 3,
-    "description": "WhatsApp on astraOS: a native app, with WhatsApp's protocol on your astraOS server.",
+    "version": "3.0.0",
+    "versionCode": 4,
+    "description": "WhatsApp on astraOS: a native app, with WhatsApp's protocol on the phone itself.",
     "descriptions": {
-        "it": "WhatsApp su astraOS: un'app nativa, con il protocollo di WhatsApp sul tuo server astraOS."
+        "it": "WhatsApp su astraOS: un'app nativa, con il protocollo di WhatsApp sul telefono stesso."
     },
     "main": "qml/Main.qml",
     "icon": "icon.svg",
@@ -15,7 +15,14 @@
     },
     "permissions": [
         "astra.permission.INTERNET",
-        "astra.permission.NOTIFICATIONS"
+        "astra.permission.NOTIFICATIONS",
+        "astra.permission.MEDIA"
+    ],
+    "services": [
+        {
+            "id": "whatsapp",
+            "exec": "bin/whatsastra-service"
+        }
     ],
     "widgets": [],
     "accent": "#25D366"
