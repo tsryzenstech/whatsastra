@@ -255,7 +255,7 @@ func (s *Store) Chats() []Chat {
 		COALESCE(m.body, ''), COALESCE(m.type, ''), COALESCE(m.from_me, 0), COALESCE(m.ack, 0)
 		FROM chats c LEFT JOIN messages m ON m.rowid = (
 			SELECT rowid FROM messages WHERE chat = c.id ORDER BY ts DESC LIMIT 1)
-		WHERE c.ts > 0 ORDER BY c.pinned DESC, c.ts DESC LIMIT 500`)
+		WHERE c.ts > 0 AND c.id != 'status@broadcast' ORDER BY c.pinned DESC, c.ts DESC LIMIT 500`)
 	if err != nil {
 		return nil
 	}
@@ -269,4 +269,27 @@ func (s *Store) Chats() []Chat {
 		}
 	}
 	return out
+}
+
+// Statuses of the last day, newest first.
+func (s *Store) Statuses(since int64) []*Message {
+	rows, err := s.db.Query(`SELECT `+messageColumns+` FROM messages WHERE chat = 'status@broadcast' AND ts > ? ORDER BY ts DESC LIMIT 300`, since)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*Message
+	for rows.Next() {
+		if m, err := scanMessage(rows); err == nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// PruneStatuses forgets statuses older than a day.
+func (s *Store) PruneStatuses(before int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db.Exec(`DELETE FROM messages WHERE chat = 'status@broadcast' AND ts < ?`, before)
 }

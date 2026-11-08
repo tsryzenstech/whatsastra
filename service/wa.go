@@ -267,21 +267,50 @@ func (w *WA) handle(evt any) {
 	}
 }
 
-// The name to show for someone: their contact name, else what they call themselves.
+// The name to show for someone: their contact name (as saved in the address
+// book of the main phone, synced with the link), else what they call
+// themselves. WhatsApp often names people by a hidden id (a LID, @lid): their
+// phone number is looked up for it.
 func (w *WA) nameOf(jid types.JID) string {
 	if w.client == nil {
 		return ""
 	}
-	c, err := w.client.Store.Contacts.GetContact(context.Background(), jid.ToNonAD())
-	if err != nil || !c.Found {
-		return ""
-	}
-	for _, n := range []string{c.FullName, c.FirstName, c.BusinessName, c.PushName} {
-		if n != "" {
-			return n
+	for _, j := range []types.JID{jid.ToNonAD(), w.phoneJID(jid)} {
+		c, err := w.client.Store.Contacts.GetContact(context.Background(), j)
+		if err != nil || !c.Found {
+			continue
+		}
+		for _, n := range []string{c.FullName, c.FirstName, c.BusinessName, c.PushName} {
+			if n != "" {
+				return n
+			}
 		}
 	}
 	return ""
+}
+
+// phoneJID is the phone number account of someone known by a LID (itself otherwise).
+func (w *WA) phoneJID(jid types.JID) types.JID {
+	jid = jid.ToNonAD()
+	if jid.Server == types.HiddenUserServer && w.client != nil {
+		if pn, err := w.client.Store.LIDs.GetPNForLID(context.Background(), jid); err == nil && !pn.IsEmpty() {
+			return pn.ToNonAD()
+		}
+	}
+	return jid
+}
+
+// Phone is someone's number as people write it ("+39 ..."), "" when unknown.
+func (w *WA) Phone(id string) string {
+	jid, err := types.ParseJID(id)
+	if err != nil {
+		return ""
+	}
+	pn := w.phoneJID(jid)
+	if pn.Server != types.DefaultUserServer {
+		return ""
+	}
+	return "+" + pn.User
 }
 
 func (w *WA) chatName(chat types.JID) string {
@@ -445,7 +474,12 @@ func (w *WA) onMessage(e *events.Message, live bool) {
 		return
 	}
 	if e.Info.Chat.Server == types.BroadcastServer {
-		return // status updates
+		// Status updates: kept a day, shown in Status (not a chat, no notification).
+		if e.Info.Chat.User == "status" && live && !m.FromMe {
+			w.store.AddMessage(m, false)
+			w.hub.Publish(Event{Kind: "status"})
+		}
+		return
 	}
 	if name := w.chatName(e.Info.Chat.ToNonAD()); name != "" && !e.Info.IsFromMe || e.Info.Chat.Server == types.GroupServer {
 		if name != "" {
@@ -888,7 +922,7 @@ func (w *WA) Media(chatID, id string) ([]byte, string, error) {
 
 // Avatar returns the profile photo of a chat (kept for a day).
 func (w *WA) Avatar(chatID string) ([]byte, error) {
-	path := filepath.Join(w.dir, "media", "avatar_"+strings.NewReplacer("@", "_", ".", "_").Replace(chatID))
+	path := filepath.Join(w.dir, "media", "round_"+strings.NewReplacer("@", "_", ".", "_").Replace(chatID))
 	if st, err := os.Stat(path); err == nil && time.Since(st.ModTime()) < 24*time.Hour {
 		if st.Size() == 0 {
 			return nil, errors.New("no photo")
@@ -923,6 +957,7 @@ func (w *WA) Avatar(chatID string) ([]byte, error) {
 			break
 		}
 	}
+	buf = round(buf)
 	os.WriteFile(path, buf, 0o600)
 	return buf, nil
 }

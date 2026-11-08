@@ -6,12 +6,18 @@ from the system's own components (Astra.Controls), so it looks and behaves like
 the rest of the phone: light and dark mode, the user's text size, the system's
 navigation and sheets. No web page in a frame.
 
-- chats with search, archived chats, pinned chats, unread counts and profile photos
+- chats with search, archived and pinned chats, unread counts and round profile
+  photos; names from your main phone's address book, phone numbers instead of
+  WhatsApp's hidden ids
 - conversations: text, photos, videos, voice messages, audio and documents
   (play, view, save to Files), replies, reactions, delete for everyone, read
-  receipts, group senders, older messages as you scroll
+  receipts, group senders, older messages as you scroll; bubbles as wide as
+  their text
 - send text, replies and photos or videos from the phone
-- start a chat with a phone number
+- new chats from your contacts or a phone number, new groups
+- groups: description and members, leave a group
+- status updates of the last day, one after the other
+- channels you follow and their posts
 - notifications for new messages, also with the app closed (one per chat)
 - link with a QR code, unlink from Settings
 

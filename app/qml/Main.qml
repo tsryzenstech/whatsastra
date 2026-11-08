@@ -18,7 +18,6 @@ Rectangle {
     // WhatsAstra's colour is its accent (app.json); my bubbles are tinted with it.
     readonly property color green: Application.accent
     readonly property color bubbleMine: Qt.tint(Theme.surface, Qt.alpha(Application.accent, Theme.light ? 0.22 : 0.35))
-    readonly property color textMine: Theme.text
 
     property string base: ""            // http://127.0.0.1:<port>
     property string token: ""
@@ -28,10 +27,14 @@ Rectangle {
     property string myName: ""
     property string myPhone: ""
     property var chats: []
+    property var statuses: []
+    property var channels: []
+    property var contacts: []
     property int seq: 0
     property string openChat: ""
     property var openPage: null
     property bool showArchived: false
+    property int tab: 0                 // 0 chats, 1 status, 2 channels
 
     // ---- the service ------------------------------------------------------------------
     function connect() {
@@ -80,7 +83,7 @@ Rectangle {
         }
     }
     function mediaUrl(m) { return app.base + "/media?chatId=" + encodeURIComponent(m.chatId) + "&id=" + encodeURIComponent(m.id) + "&token=" + app.token }
-    function avatarUrl(chatId) { return app.base ? app.base + "/avatar?chatId=" + encodeURIComponent(chatId) + "&token=" + app.token : "" }
+    function avatarUrl(id) { return app.base && id ? app.base + "/avatar?chatId=" + encodeURIComponent(id) + "&token=" + app.token : "" }
 
     function refreshState() {
         api("GET", "state", null, (code, body, err) => {
@@ -93,13 +96,17 @@ Rectangle {
             app.qr = body.qr || ""
             app.myName = body.name || ""
             app.myPhone = body.phone || ""
-            if (app.status === "ready")
+            if (app.status === "ready") {
                 app.refreshChats()
+                app.refreshStatuses()
+            }
         })
     }
-    function refreshChats() {
-        api("GET", "chats", null, (code, body, err) => { if (!err) app.chats = body || [] })
-    }
+    function refreshChats() { api("GET", "chats", null, (c, body, err) => { if (!err) app.chats = body || [] }) }
+    function refreshStatuses() { api("GET", "status", null, (c, body, err) => { if (!err) app.statuses = body || [] }) }
+    function refreshChannels() { api("GET", "channels", null, (c, body, err) => { if (!err) app.channels = body || [] }) }
+    function refreshContacts() { api("GET", "contacts", null, (c, body, err) => { if (!err) app.contacts = body || [] }) }
+
     // Long poll: the service answers as soon as something changes.
     function listen() {
         api("GET", "events?since=" + app.seq, null, (code, body, err) => {
@@ -114,6 +121,7 @@ Rectangle {
                 switch (e.kind) {
                 case "state": app.refreshState(); break
                 case "chats": chatsChanged = true; break
+                case "status": Qt.callLater(app.refreshStatuses); break
                 case "message":
                     chatsChanged = true
                     if (app.openPage && e.message.chatId === app.openChat)
@@ -136,7 +144,7 @@ Rectangle {
 
     // The chat on screen: read, and no notification for it.
     function setFocus() {
-        const chat = Qt.application.state === Qt.ApplicationActive && app.openPage ? app.openChat : ""
+        const chat = Qt.application.state === Qt.ApplicationActive && app.openPage && !app.openPage.channel ? app.openChat : ""
         api("POST", "focus", { chatId: chat }, null)
     }
     Connections {
@@ -164,8 +172,11 @@ Rectangle {
     onStatusChanged: if (status === "ready" && Application.args.chatId && stack.depth === 1) openChatById(Application.args.chatId)
 
     // ---- helpers ------------------------------------------------------------------------
+    function isGroup(id) { return String(id).endsWith("@g.us") }
     function nameOf(chat) {
-        return chat && chat.name ? chat.name : "+" + String(chat ? chat.id : "").split("@")[0]
+        if (!chat)
+            return ""
+        return chat.name || chat.phone || "+" + String(chat.id).split("@")[0]
     }
     function initials(name) {
         const parts = String(name || "?").replace(/^\+/, "").trim().split(/\s+/)
@@ -207,12 +218,347 @@ Rectangle {
     function duration(s) { return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2) }
     function ticks(ack) { return ack >= 2 ? "✓✓" : ack === 1 ? "✓" : ack < 0 ? "!" : "🕓" }
 
-    // ---- linked: chats, conversations, settings ----------------------------------------
+    // A round photo (the service makes it round), or the initials in a circle.
+    component Avatar: Item {
+        id: avatar
+        property string chatId
+        property string name
+        property real size: 52
+        property bool ring: false
+        width: size
+        height: size
+        Rectangle {
+            anchors.fill: parent
+            radius: width / 2
+            color: avatar.ring ? "transparent" : Theme.surfaceRaised
+            border.width: avatar.ring ? 3 : 0
+            border.color: app.green
+        }
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: avatar.ring ? 5 : 0
+            radius: width / 2
+            color: Theme.surfaceRaised
+            Text {
+                anchors.centerIn: parent
+                visible: photo.status !== Image.Ready
+                text: app.isGroup(avatar.chatId) ? "👥" : app.initials(avatar.name)
+                font.family: Theme.fontFamily
+                font.pixelSize: parent.width * 0.36
+                font.weight: Font.DemiBold
+                color: Theme.textSecondary
+            }
+            Image {
+                id: photo
+                anchors.fill: parent
+                source: app.avatarUrl(avatar.chatId)
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                sourceSize.width: 160
+                visible: status === Image.Ready
+            }
+        }
+    }
+
+    // ---- linked: chats, status, channels ----------------------------------------------------
     PageStack {
         id: stack
         anchors.fill: parent
         visible: app.status === "ready" || (depth > 1 && app.status === "authenticating")
-        Component.onCompleted: open(chatsPage)
+        Component.onCompleted: open(homePage)
+    }
+
+    Component {
+        id: homePage
+        Item {
+            property var stack
+            Item {
+                anchors.fill: parent
+                anchors.bottomMargin: tabs.height
+
+                // Chats
+                Page {
+                    id: chatsList
+                    anchors.fill: parent
+                    visible: app.tab === 0
+                    title: app.showArchived ? qsTr("Archived") : qsTr("Chats")
+                    actions: Row {
+                        spacing: 8
+                        IconButton { iconName: "edit"; onClicked: { app.refreshContacts(); newChat.start(false) } }
+                        IconButton { iconName: "settings"; onClicked: stack.open(settingsPage) }
+                    }
+
+                    readonly property string query: search.text.trim().toLowerCase()
+                    readonly property var visibleChats: app.chats.filter(c => chatsList.query
+                        ? (String(app.nameOf(c)).toLowerCase().includes(chatsList.query) || String(c.phone || "").includes(chatsList.query))
+                        : (c.archived === app.showArchived && !String(c.id).endsWith("@newsletter")))
+                    readonly property int archivedCount: app.chats.filter(c => c.archived).length
+
+                    TextField { id: search; width: parent.width; placeholder: qsTr("Search") }
+
+                    ListItem {
+                        visible: !app.showArchived && chatsList.archivedCount > 0 && !chatsList.query
+                        width: parent.width
+                        iconName: "archive"
+                        text: qsTr("Archived")
+                        value: String(chatsList.archivedCount)
+                        chevron: true
+                        onClicked: app.showArchived = true
+                    }
+                    ListItem {
+                        visible: app.showArchived
+                        width: parent.width
+                        iconName: "chevron-left"
+                        text: qsTr("All chats")
+                        onClicked: app.showArchived = false
+                    }
+                    EmptyState {
+                        visible: chatsList.visibleChats.length === 0
+                        iconName: "message"
+                        title: chatsList.query ? qsTr("No results") : qsTr("No chats yet")
+                        message: chatsList.query ? "" : qsTr("Your WhatsApp chats show up here. Messages before linking arrive in a few minutes.")
+                    }
+                    Column {
+                        width: parent.width
+                        Repeater {
+                            model: chatsList.visibleChats
+                            delegate: Item {
+                                id: row
+                                required property var modelData
+                                width: parent.width
+                                height: 76
+                                Avatar {
+                                    id: avatar
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    chatId: row.modelData.id
+                                    name: app.nameOf(row.modelData)
+                                    size: 54
+                                }
+                                Column {
+                                    anchors.left: avatar.right
+                                    anchors.leftMargin: 14
+                                    anchors.right: meta.left
+                                    anchors.rightMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 3
+                                    Text {
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                        text: app.nameOf(row.modelData)
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.headlineSize
+                                        font.weight: Font.DemiBold
+                                        color: Theme.text
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                        text: (row.modelData.lastFromMe ? app.ticks(row.modelData.lastAck) + " " : "") + app.preview(row.modelData)
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.bodySize
+                                        font.italic: row.modelData.lastMessageType === "deleted"
+                                        color: Theme.textSecondary
+                                    }
+                                }
+                                Column {
+                                    id: meta
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 6
+                                    Text {
+                                        anchors.right: parent.right
+                                        text: app.when(row.modelData.timestamp)
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.captionSize
+                                        color: row.modelData.unreadCount > 0 ? app.green : Theme.textTertiary
+                                    }
+                                    Row {
+                                        anchors.right: parent.right
+                                        spacing: 6
+                                        Icon { visible: row.modelData.pinned; name: "pin"; size: 16; color: Theme.textTertiary }
+                                        Rectangle {
+                                            visible: row.modelData.unreadCount > 0
+                                            width: Math.max(22, unread.implicitWidth + 12)
+                                            height: 22
+                                            radius: 11
+                                            color: app.green
+                                            Text {
+                                                id: unread
+                                                anchors.centerIn: parent
+                                                text: row.modelData.unreadCount
+                                                font.family: Theme.fontFamily
+                                                font.pixelSize: Theme.captionSize
+                                                font.weight: Font.Bold
+                                                color: Theme.accentText
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    anchors.left: avatar.right
+                                    anchors.leftMargin: 14
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 1
+                                    color: Theme.separator
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: stack.open(conversationPage, { chat: row.modelData })
+                                    onPressAndHold: Dialogs.show({ title: app.nameOf(row.modelData),
+                                                                   buttons: [{ id: "cancel", label: qsTr("Cancel") },
+                                                                             { id: "delete", label: qsTr("Delete Chat"), style: "destructive" }] },
+                                                                 function(answer) {
+                                        if (answer === "delete")
+                                            app.api("POST", "deleteChat", { chatId: row.modelData.id }, null)
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Status
+                Page {
+                    anchors.fill: parent
+                    visible: app.tab === 1
+                    title: qsTr("Status")
+                    EmptyState {
+                        visible: app.statuses.length === 0
+                        iconName: "sparkles"
+                        title: qsTr("No status updates")
+                        message: qsTr("Your contacts' status updates of the last 24 hours show up here.")
+                    }
+                    ListGroup {
+                        visible: app.statuses.length > 0
+                        title: qsTr("Recent updates")
+                        Repeater {
+                            model: app.statuses
+                            delegate: Item {
+                                id: srow
+                                required property var modelData
+                                required property int index
+                                width: parent.width
+                                height: 72
+                                Avatar {
+                                    id: savatar
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    chatId: srow.modelData.id
+                                    name: srow.modelData.name || srow.modelData.phone
+                                    size: 54
+                                    ring: true
+                                }
+                                Column {
+                                    anchors.left: savatar.right
+                                    anchors.leftMargin: 14
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Text {
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                        text: srow.modelData.name || srow.modelData.phone || qsTr("Someone")
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.headlineSize
+                                        font.weight: Font.DemiBold
+                                        color: Theme.text
+                                    }
+                                    Text {
+                                        text: app.when(srow.modelData.timestamp) + " · " + qsTr("%n update(s)", "", srow.modelData.items.length)
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.captionSize
+                                        color: Theme.textSecondary
+                                    }
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: storyViewer.show(srow.index) }
+                            }
+                        }
+                    }
+                }
+
+                // Channels
+                Page {
+                    anchors.fill: parent
+                    visible: app.tab === 2
+                    title: qsTr("Channels")
+                    onVisibleChanged: if (visible) app.refreshChannels()
+                    EmptyState {
+                        visible: app.channels.length === 0
+                        iconName: "globe"
+                        title: qsTr("No channels")
+                        message: qsTr("The channels you follow in WhatsApp show up here.")
+                    }
+                    Column {
+                        width: parent.width
+                        Repeater {
+                            model: app.channels
+                            delegate: Item {
+                                id: crow
+                                required property var modelData
+                                width: parent.width
+                                height: 76
+                                Avatar {
+                                    id: cavatar
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    chatId: crow.modelData.id
+                                    name: crow.modelData.name
+                                    size: 54
+                                }
+                                Column {
+                                    anchors.left: cavatar.right
+                                    anchors.leftMargin: 14
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 3
+                                    Text {
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                        text: crow.modelData.name + (crow.modelData.verified ? " ✓" : "")
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.headlineSize
+                                        font.weight: Font.DemiBold
+                                        color: Theme.text
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                        text: qsTr("%1 followers").arg(Number(crow.modelData.subscribers || 0).toLocaleString(Qt.locale(), "f", 0))
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.captionSize
+                                        color: Theme.textSecondary
+                                    }
+                                }
+                                Rectangle {
+                                    anchors.left: cavatar.right
+                                    anchors.leftMargin: 14
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 1
+                                    color: Theme.separator
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: stack.open(conversationPage, { chat: crow.modelData, channel: true })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            TabBar {
+                id: tabs
+                currentIndex: app.tab
+                tint: app.green
+                model: [{ icon: "message", label: qsTr("Chats") }, { icon: "sparkles", label: qsTr("Status") },
+                        { icon: "globe", label: qsTr("Channels") }]
+                onActivated: (index) => {
+                    app.tab = index
+                    if (index === 1)
+                        app.refreshStatuses()
+                }
+            }
+        }
     }
 
     // ---- not linked yet, or connecting ----------------------------------------------------
@@ -251,7 +597,7 @@ Rectangle {
                         width: Math.min(parent.width, 300)
                         height: width
                         radius: 12
-                        color: "white"
+                        color: Theme.surface
                         Image {
                             anchors.fill: parent
                             anchors.margins: 8
@@ -272,7 +618,6 @@ Rectangle {
                 color: Theme.textTertiary
             }
         }
-
         EmptyState {
             visible: app.status === "loading" || app.status === "starting" || app.status === "authenticating"
             iconName: "message"
@@ -298,191 +643,20 @@ Rectangle {
         }
     }
 
-    // ---- chats ----------------------------------------------------------------------------
-    Component {
-        id: chatsPage
-        Page {
-            id: chatsList
-            title: app.showArchived ? qsTr("Archived") : qsTr("Chats")
-            actions: Row {
-                spacing: 8
-                IconButton { iconName: "edit"; onClicked: newChat.open() }
-                IconButton { iconName: "settings"; onClicked: stack.open(settingsPage) }
-            }
-
-            readonly property string query: search.text.trim().toLowerCase()
-            readonly property var visibleChats: app.chats.filter(c =>
-                (chatsList.query ? String(app.nameOf(c)).toLowerCase().includes(chatsList.query) : c.archived === app.showArchived))
-            readonly property int archivedCount: app.chats.filter(c => c.archived).length
-
-            TextField { id: search; width: parent.width; placeholder: qsTr("Search") }
-
-            ListItem {
-                visible: !app.showArchived && chatsList.archivedCount > 0 && !chatsList.query
-                width: parent.width
-                iconName: "archive"
-                text: qsTr("Archived")
-                value: String(chatsList.archivedCount)
-                chevron: true
-                onClicked: app.showArchived = true
-            }
-            ListItem {
-                visible: app.showArchived
-                width: parent.width
-                iconName: "chevron-left"
-                text: qsTr("All chats")
-                onClicked: app.showArchived = false
-            }
-
-            EmptyState {
-                visible: chatsList.visibleChats.length === 0
-                iconName: "message"
-                title: chatsList.query ? qsTr("No results") : qsTr("No chats yet")
-                message: chatsList.query ? "" : qsTr("Your WhatsApp chats show up here. Messages before linking arrive in a few minutes.")
-            }
-
-            Column {
-                width: parent.width
-                Repeater {
-                    model: chatsList.visibleChats
-                    delegate: Item {
-                        id: row
-                        required property var modelData
-                        width: parent.width
-                        height: 76
-                        Avatar {
-                            id: avatar
-                            anchors.verticalCenter: parent.verticalCenter
-                            chat: row.modelData
-                            size: 54
-                        }
-                        Column {
-                            anchors.left: avatar.right
-                            anchors.leftMargin: 14
-                            anchors.right: meta.left
-                            anchors.rightMargin: 8
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 3
-                            Text {
-                                width: parent.width
-                                elide: Text.ElideRight
-                                text: app.nameOf(row.modelData)
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.headlineSize
-                                font.weight: Font.DemiBold
-                                color: Theme.text
-                            }
-                            Text {
-                                width: parent.width
-                                elide: Text.ElideRight
-                                maximumLineCount: 1
-                                text: (row.modelData.lastFromMe ? app.ticks(row.modelData.lastAck) + " " : "") + app.preview(row.modelData)
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.captionSize + 1
-                                font.italic: row.modelData.lastMessageType === "deleted"
-                                color: Theme.textSecondary
-                            }
-                        }
-                        Column {
-                            id: meta
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 6
-                            Text {
-                                anchors.right: parent.right
-                                text: app.when(row.modelData.timestamp)
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.captionSize
-                                color: row.modelData.unreadCount > 0 ? app.green : Theme.textTertiary
-                            }
-                            Row {
-                                anchors.right: parent.right
-                                spacing: 6
-                                Icon { visible: row.modelData.pinned; name: "pin"; size: 16; color: Theme.textTertiary }
-                                Rectangle {
-                                    visible: row.modelData.unreadCount > 0
-                                    width: Math.max(22, unread.implicitWidth + 12)
-                                    height: 22
-                                    radius: 11
-                                    color: app.green
-                                    Text {
-                                        id: unread
-                                        anchors.centerIn: parent
-                                        text: row.modelData.unreadCount
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.captionSize
-                                        font.weight: Font.Bold
-                                        color: "white"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            anchors.left: avatar.right
-                            anchors.leftMargin: 14
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 1
-                            color: Theme.separator
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: stack.open(conversationPage, { chat: row.modelData })
-                            onPressAndHold: Dialogs.show({ title: app.nameOf(row.modelData),
-                                                           buttons: [{ id: "cancel", label: qsTr("Cancel") },
-                                                                     { id: "delete", label: qsTr("Delete Chat"), style: "destructive" }] },
-                                                         function(answer) {
-                                if (answer === "delete")
-                                    app.api("POST", "deleteChat", { chatId: row.modelData.id }, null)
-                            })
-                        }
-                    }
-                }
-            }
-
-        }
-    }
-
-    // A chat's photo, or its initials.
-    component Avatar: Rectangle {
-        property var chat
-        property real size: 52
-        width: size
-        height: size
-        radius: size / 2
-        color: Theme.surfaceRaised
-        clip: true
-        Text {
-            anchors.centerIn: parent
-            visible: photo.status !== Image.Ready
-            text: parent.chat && parent.chat.isGroup ? "👥" : app.initials(app.nameOf(parent.chat))
-            font.family: Theme.fontFamily
-            font.pixelSize: parent.size * 0.36
-            font.weight: Font.DemiBold
-            color: Theme.textSecondary
-        }
-        Image {
-            id: photo
-            anchors.fill: parent
-            source: parent.chat ? app.avatarUrl(parent.chat.id) : ""
-            fillMode: Image.PreserveAspectCrop
-            asynchronous: true
-            sourceSize.width: 128
-            visible: status === Image.Ready
-        }
-    }
-
-    // ---- a conversation ---------------------------------------------------------------------
+    // ---- a conversation, or a channel's posts ----------------------------------------------
     Component {
         id: conversationPage
         Item {
             id: page
             property var stack
             property var chat
+            property bool channel: false
             property var messages: []
             property var replyTo: null
             property string sendError: ""
             property bool older: true
+            readonly property bool group: app.isGroup(chat ? chat.id : "")
+            readonly property var live: chat ? (app.chats.find(c => c.id === chat.id) || chat) : ({})
 
             function add(m) {
                 const i = messages.findIndex(x => x.id === m.id)
@@ -509,11 +683,15 @@ Rectangle {
                 })
             }
             function load() {
-                app.api("GET", "messages?chatId=" + encodeURIComponent(chat.id) + "&limit=60", null, (code, body, err) => {
-                    if (err)
+                const path = channel ? "channelMessages?id=" + encodeURIComponent(chat.id)
+                                     : "messages?chatId=" + encodeURIComponent(chat.id) + "&limit=60"
+                app.api("GET", path, null, (code, body, err) => {
+                    if (err) {
+                        page.sendError = err
                         return
+                    }
                     page.messages = body || []
-                    page.older = page.messages.length >= 60
+                    page.older = !channel && page.messages.length >= 60
                     Qt.callLater(list.positionViewAtEnd)
                 })
             }
@@ -555,14 +733,17 @@ Rectangle {
                 })
             }
             function messageMenu(m) {
-                const buttons = [{ id: "reply", label: qsTr("Reply") }]
+                const buttons = []
+                if (!channel)
+                    buttons.push({ id: "reply", label: qsTr("Reply") })
                 if (m.body)
                     buttons.push({ id: "copy", label: qsTr("Copy") })
                 if (m.hasMedia)
                     buttons.push({ id: "save", label: qsTr("Save to Files") })
-                for (const e of ["👍", "❤️", "😂", "😮", "😢", "🙏"])
-                    buttons.push({ id: "react:" + e, label: e })
-                if (m.fromMe && m.type !== "deleted" && Date.now() / 1000 - m.timestamp < 2 * 86400)
+                if (!channel)
+                    for (const e of ["👍", "❤️", "😂", "😮", "😢", "🙏"])
+                        buttons.push({ id: "react:" + e, label: e })
+                if (!channel && m.fromMe && m.type !== "deleted" && Date.now() / 1000 - m.timestamp < 2 * 86400)
                     buttons.push({ id: "revoke", label: qsTr("Delete for Everyone"), style: "destructive" })
                 buttons.push({ id: "cancel", label: qsTr("Cancel") })
                 Dialogs.show({ title: m.body ? m.body.substring(0, 80) : app.typeLabel(m.type), buttons: buttons }, function(answer) {
@@ -607,9 +788,9 @@ Rectangle {
             ListView {
                 id: list
                 anchors.fill: parent
-                anchors.topMargin: Theme.statusBarHeight + 60
-                anchors.bottomMargin: composer.height + 36 + (replyBar.visible ? replyBar.height : 0)
-                spacing: 3
+                anchors.topMargin: Theme.statusBarHeight + 64
+                anchors.bottomMargin: page.channel ? 24 : composer.height + 36 + (replyBar.visible ? replyBar.height + 6 : 0)
+                spacing: 4
                 clip: true
                 model: page.messages
                 onAtYBeginningChanged: if (atYBeginning && contentHeight > height) page.loadOlder()
@@ -618,12 +799,34 @@ Rectangle {
                     required property var modelData
                     required property int index
                     readonly property bool mine: modelData.fromMe === true
-                    readonly property bool group: page.chat && String(page.chat.id).endsWith("@g.us")
                     readonly property bool newDay: index === 0 || new Date(page.messages[index - 1].timestamp * 1000).toDateString()
                                                                    !== new Date(modelData.timestamp * 1000).toDateString()
-                    readonly property real maxWidth: list.width * 0.8
+                    readonly property real maxWidth: list.width * 0.78
+                    readonly property bool picture: modelData.hasMedia && (modelData.type === "image" || modelData.type === "sticker")
+                    readonly property bool mediaRow: modelData.hasMedia && ["video", "voice", "audio", "document"].indexOf(modelData.type) >= 0
+                    readonly property string bodyText: modelData.type === "deleted" ? "🚫 " + app.typeLabel("deleted")
+                        : modelData.body || (!modelData.hasMedia ? app.typeLabel(modelData.type) : "")
+                    readonly property string mediaLabel: modelData.type === "document" ? (modelData.fileName || qsTr("Document"))
+                        : app.typeLabel(modelData.type) + (modelData.seconds ? " · " + app.duration(modelData.seconds) : "")
+                    readonly property bool showSender: page.group && !mine
+                    readonly property string senderText: modelData.senderName || ("+" + String(modelData.sender || "").split("@")[0])
                     width: list.width
                     height: (newDay ? 34 : 0) + bubble.height + (modelData.reaction ? 16 : 4)
+
+                    // The natural size of what the bubble holds, unwrapped: the
+                    // bubble takes it, up to maxWidth, and the text wraps inside.
+                    Text { id: measureBody; visible: false; text: msg.bodyText; textFormat: Text.PlainText
+                           font.family: Theme.fontFamily; font.pixelSize: Theme.bodySize }
+                    Text { id: measureSender; visible: false; text: msg.showSender ? msg.senderText : ""
+                           font.family: Theme.fontFamily; font.pixelSize: Theme.captionSize; font.weight: Font.DemiBold }
+                    Text { id: measureMedia; visible: false; text: msg.mediaRow ? msg.mediaLabel : ""
+                           font.family: Theme.fontFamily; font.pixelSize: Theme.bodySize }
+                    readonly property real naturalWidth: Math.max(msg.bodyText ? measureBody.implicitWidth : 0,
+                                                                  measureSender.implicitWidth,
+                                                                  msg.mediaRow ? measureMedia.implicitWidth + 50 : 0,
+                                                                  msg.picture ? 240 : 0,
+                                                                  modelData.quote ? 160 : 0,
+                                                                  footer.implicitWidth + 4)
 
                     Rectangle {
                         visible: msg.newDay
@@ -647,19 +850,21 @@ Rectangle {
                         id: bubble
                         y: msg.newDay ? 34 : 0
                         x: msg.mine ? parent.width - width - 10 : 10
-                        width: Math.min(msg.maxWidth, Math.max(content.implicitWidth, footer.implicitWidth + 8) + 20)
-                        height: content.implicitHeight + footer.implicitHeight + 14
-                        radius: 14
+                        width: Math.min(msg.maxWidth, msg.naturalWidth + 24)
+                        height: content.height + footer.height + 14
+                        radius: 16
                         color: msg.mine ? app.bubbleMine : Theme.surface
                         Column {
                             id: content
-                            x: 10
-                            y: 6
-                            width: bubble.width - 20
+                            x: 12
+                            y: 7
+                            width: bubble.width - 24
                             spacing: 4
                             Text {
-                                visible: msg.group && !msg.mine && msg.modelData.senderName !== undefined
-                                text: msg.modelData.senderName || ("+" + String(msg.modelData.sender || "").split("@")[0])
+                                visible: msg.showSender
+                                width: parent.width
+                                elide: Text.ElideRight
+                                text: msg.senderText
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.captionSize
                                 font.weight: Font.DemiBold
@@ -690,8 +895,8 @@ Rectangle {
                             }
                             // Photo, sticker
                             Image {
-                                visible: msg.modelData.hasMedia && (msg.modelData.type === "image" || msg.modelData.type === "sticker")
-                                width: visible ? Math.min(content.width, 260) : 0
+                                visible: msg.picture
+                                width: visible ? parent.width : 0
                                 height: visible ? (status === Image.Ready ? width * implicitHeight / Math.max(1, implicitWidth) : 180) : 0
                                 source: visible ? app.mediaUrl(msg.modelData) : ""
                                 asynchronous: true
@@ -702,48 +907,48 @@ Rectangle {
                             }
                             // Video, voice, audio, document
                             Row {
-                                visible: msg.modelData.hasMedia && ["video", "voice", "audio", "document"].indexOf(msg.modelData.type) >= 0
+                                visible: msg.mediaRow
+                                width: parent.width
                                 spacing: 10
                                 IconButton {
+                                    id: play
                                     size: 40
                                     iconName: msg.modelData.type === "document" ? "file"
                                             : player.playing === msg.modelData.id ? "pause" : "play"
                                     color: app.green
-                                    iconColor: "white"
+                                    iconColor: Theme.accentText
                                     onClicked: msg.modelData.type === "document" ? page.messageMenu(msg.modelData)
                                              : msg.modelData.type === "video" ? viewer.show(msg.modelData)
                                              : player.toggle(msg.modelData)
                                 }
                                 Text {
                                     anchors.verticalCenter: parent.verticalCenter
-                                    width: Math.min(implicitWidth, content.width - 50)
+                                    width: parent.width - play.width - 10
                                     elide: Text.ElideMiddle
-                                    text: msg.modelData.type === "document" ? (msg.modelData.fileName || qsTr("Document"))
-                                        : app.typeLabel(msg.modelData.type) + (msg.modelData.seconds ? " · " + app.duration(msg.modelData.seconds) : "")
+                                    text: msg.mediaLabel
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.bodySize
-                                    color: msg.mine ? app.textMine : Theme.text
+                                    color: Theme.text
                                 }
                             }
                             Text {
-                                visible: text !== ""
-                                width: Math.min(implicitWidth, content.width)
+                                visible: msg.bodyText !== ""
+                                width: parent.width
                                 wrapMode: Text.Wrap
                                 textFormat: Text.PlainText
-                                text: msg.modelData.type === "deleted" ? "🚫 " + app.typeLabel("deleted")
-                                    : msg.modelData.body || (!msg.modelData.hasMedia ? app.typeLabel(msg.modelData.type) : "")
+                                text: msg.bodyText
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.bodySize
                                 font.italic: msg.modelData.type === "deleted"
-                                color: msg.mine ? app.textMine : Theme.text
+                                color: Theme.text
                             }
                         }
                         Text {
                             id: footer
                             anchors.right: parent.right
-                            anchors.rightMargin: 10
+                            anchors.rightMargin: 12
                             anchors.bottom: parent.bottom
-                            anchors.bottomMargin: 4
+                            anchors.bottomMargin: 5
                             text: msg.modelData.ack < 0 ? qsTr("Not sent")
                                 : Qt.formatTime(new Date(msg.modelData.timestamp * 1000), "HH:mm") + (msg.mine ? "  " + app.ticks(msg.modelData.ack) : "")
                             font.family: Theme.fontFamily
@@ -767,49 +972,61 @@ Rectangle {
                         color: Theme.surfaceRaised
                         border.color: Theme.background
                         border.width: 2
-                        Text { id: reactionText; anchors.centerIn: parent; text: msg.modelData.reaction || ""; font.pixelSize: 13 }
+                        Text { id: reactionText; anchors.centerIn: parent; text: msg.modelData.reaction || ""; font.pixelSize: Theme.captionSize }
                     }
                 }
             }
 
-            // Header
+            // Header: the chat, its number or its group
             Rectangle {
                 width: parent.width
-                height: Theme.statusBarHeight + 60
+                height: Theme.statusBarHeight + 64
                 color: Theme.background
                 IconButton {
                     x: 10
-                    y: Theme.statusBarHeight + 8
+                    y: Theme.statusBarHeight + 10
                     size: 40
                     iconName: "chevron-left"
                     onClicked: page.stack.pop()
                 }
                 Avatar {
                     x: 58
-                    y: Theme.statusBarHeight + 8
-                    size: 42
-                    chat: page.chat
+                    y: Theme.statusBarHeight + 9
+                    size: 44
+                    chatId: page.chat ? page.chat.id : ""
+                    name: app.nameOf(page.live)
                 }
                 Column {
-                    x: 112
-                    width: parent.width - 124
+                    x: 114
+                    width: parent.width - 126
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.verticalCenterOffset: Theme.statusBarHeight / 2
                     Text {
                         width: parent.width
                         elide: Text.ElideRight
-                        text: page.chat ? (app.chats.find(c => c.id === page.chat.id) || page.chat).name || app.nameOf(page.chat) : ""
+                        text: app.nameOf(page.live)
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.headlineSize
                         font.weight: Font.DemiBold
                         color: Theme.text
                     }
                     Text {
-                        text: page.chat && String(page.chat.id).endsWith("@g.us") ? qsTr("Group") : "+" + String(page.chat ? page.chat.id : "").split("@")[0]
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: page.channel ? qsTr("Channel")
+                            : page.group ? qsTr("Group · tap for info")
+                            : (page.live.name && page.live.phone ? page.live.phone : qsTr("WhatsApp"))
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.captionSize
                         color: Theme.textSecondary
                     }
+                }
+                MouseArea {
+                    x: 58
+                    width: parent.width - 58
+                    height: parent.height
+                    enabled: page.group
+                    onClicked: page.stack.open(groupPage, { chat: page.live })
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.separator }
             }
@@ -862,9 +1079,10 @@ Rectangle {
                 }
             }
 
-            // Composer
+            // Composer (not in channels: they are read only)
             Row {
                 id: composer
+                visible: !page.channel
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 28
                 x: 10
@@ -890,7 +1108,7 @@ Rectangle {
                     size: 48
                     iconName: "send"
                     color: input.text.trim() ? app.green : Theme.surfaceRaised
-                    iconColor: input.text.trim() ? "white" : Theme.textSecondary
+                    iconColor: input.text.trim() ? Theme.accentText : Theme.textSecondary
                     onClicked: page.send()
                 }
             }
@@ -965,72 +1183,125 @@ Rectangle {
                 }
                 onPlaybackStateChanged: if (playbackState === MediaPlayer.StoppedState) playing = ""
             }
+        }
+    }
 
-            // Photos and videos full screen
-            Rectangle {
-                id: viewer
-                property var item: null
-                function show(m) { item = m }
-                anchors.fill: parent
-                visible: item !== null
-                color: "black"
-                z: 10
-                Image {
-                    anchors.fill: parent
-                    visible: viewer.item && viewer.item.type !== "video"
-                    source: visible ? app.mediaUrl(viewer.item) : ""
-                    fillMode: Image.PreserveAspectFit
-                    asynchronous: true
-                }
-                VideoOutput {
-                    id: video
-                    anchors.fill: parent
-                    visible: viewer.item && viewer.item.type === "video"
-                }
-                MediaPlayer {
-                    id: videoPlayer
-                    videoOutput: video
-                    audioOutput: AudioOutput {}
-                    source: viewer.item && viewer.item.type === "video" ? app.mediaUrl(viewer.item) : ""
-                    onSourceChanged: if (source != "") play()
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    onClicked: {
-                        videoPlayer.stop()
-                        viewer.item = null
+    // ---- a group: its description and members ------------------------------------------------
+    Component {
+        id: groupPage
+        Page {
+            id: gpage
+            property var chat
+            property var info: null
+            property string message: ""
+            title: info ? info.name : app.nameOf(chat)
+            Component.onCompleted: app.api("GET", "group?chatId=" + encodeURIComponent(chat.id), null, (c, body, err) => {
+                gpage.info = body
+                gpage.message = err || ""
+            })
+            Spinner { visible: !gpage.info && !gpage.message; anchors.horizontalCenter: parent.horizontalCenter }
+            Text {
+                visible: gpage.message !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: gpage.message
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.bodySize
+                color: Theme.textSecondary
+            }
+            Item {
+                width: parent.width
+                height: 120
+                Avatar { anchors.centerIn: parent; size: 100; chatId: gpage.chat.id; name: gpage.title }
+            }
+            Text {
+                visible: !!(gpage.info && gpage.info.topic)
+                width: parent.width
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+                text: gpage.info ? gpage.info.topic : ""
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.bodySize
+                color: Theme.textSecondary
+            }
+            ListGroup {
+                visible: !!gpage.info
+                title: gpage.info ? qsTr("%n member(s)", "", gpage.info.members.length) : ""
+                Repeater {
+                    model: gpage.info ? gpage.info.members : []
+                    delegate: ListItem {
+                        required property var modelData
+                        required property int index
+                        text: modelData.me ? qsTr("You") : (modelData.name || modelData.phone || qsTr("Someone"))
+                        subtitle: modelData.me ? "" : (modelData.name ? modelData.phone : "")
+                        value: modelData.admin ? qsTr("Admin") : ""
+                        separator: index < gpage.info.members.length - 1
+                        onClicked: if (!modelData.me && modelData.phone) {
+                            app.api("POST", "newChat", { phone: modelData.phone }, (c, body, err) => {
+                                if (!err)
+                                    stack.open(conversationPage, { chat: body })
+                            })
+                        }
                     }
                 }
-                Text {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 40
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: parent.width - 40
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
-                    text: viewer.item ? viewer.item.body || "" : ""
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.bodySize
-                    color: "white"
+            }
+            ListGroup {
+                visible: !!gpage.info
+                ListItem {
+                    text: qsTr("Leave Group")
+                    destructive: true
+                    separator: false
+                    onClicked: Dialogs.show({ title: qsTr("Leave %1?").arg(gpage.title),
+                                              buttons: [{ id: "cancel", label: qsTr("Cancel") },
+                                                        { id: "leave", label: qsTr("Leave"), style: "destructive" }] },
+                                            function(answer) {
+                        if (answer === "leave")
+                            app.api("POST", "leaveGroup", { chatId: gpage.chat.id }, (c, body, err) => {
+                                if (err)
+                                    gpage.message = err
+                                else
+                                    stack.pop(null)
+                            })
+                    })
                 }
             }
         }
     }
 
-    // Starting a chat with a phone number (from Chats).
+    // ---- a new chat: a contact, a number, or a new group ---------------------------------------
     Sheet {
         id: newChat
-        title: qsTr("New Chat")
+        title: groupMode ? qsTr("New Group") : qsTr("New Chat")
+        property bool groupMode: false
+        property var picked: []
         property string error: ""
+        function start(group) {
+            groupMode = group
+            picked = []
+            error = ""
+            find.text = ""
+            open()
+        }
+        readonly property string digits: find.text.replace(/[^0-9]/g, "")
+        readonly property var matches: app.contacts.filter(c => !find.text.trim()
+            || c.name.toLowerCase().includes(find.text.trim().toLowerCase()) || c.phone.includes(newChat.digits || "§")).slice(0, 80)
+        function openChat(chat) {
+            newChat.close()
+            stack.open(conversationPage, { chat: chat })
+        }
         Column {
             width: parent.width
-            spacing: 14
+            spacing: 12
             TextField {
-                id: phone
+                id: groupName
+                visible: newChat.groupMode
                 width: parent.width
-                placeholder: qsTr("Phone number with country code")
-                inputMethodHints: Qt.ImhDialableCharactersOnly
-                onAccepted: start.clicked()
+                placeholder: qsTr("Group name")
+            }
+            TextField {
+                id: find
+                width: parent.width
+                placeholder: newChat.groupMode ? qsTr("Add people") : qsTr("Name or number with country code")
             }
             Text {
                 visible: newChat.error !== ""
@@ -1042,19 +1313,255 @@ Rectangle {
                 color: Theme.danger
             }
             Button {
-                id: start
+                visible: newChat.groupMode
                 width: parent.width
-                text: qsTr("Start Chat")
-                enabled: phone.text.trim().length >= 6
-                onClicked: app.api("POST", "newChat", { phone: phone.text }, (code, body, err) => {
+                enabled: groupName.text.trim() !== "" && newChat.picked.length > 0
+                text: qsTr("Create Group (%1)").arg(newChat.picked.length)
+                onClicked: app.api("POST", "createGroup", { name: groupName.text, participants: newChat.picked }, (c, body, err) => {
                     newChat.error = err
-                    if (err)
-                        return
-                    newChat.close()
-                    phone.text = ""
-                    stack.open(conversationPage, { chat: body })
+                    if (!err)
+                        newChat.openChat(body)
                 })
             }
+            Flickable {
+                width: parent.width
+                height: Math.min(contentHeight, 420)
+                contentHeight: people.height
+                clip: true
+                Column {
+                    id: people
+                    width: parent.width
+                    ListItem {
+                        visible: !newChat.groupMode && !find.text.trim()
+                        width: parent.width
+                        iconName: "person-add"
+                        text: qsTr("New Group")
+                        chevron: true
+                        onClicked: newChat.groupMode = true
+                    }
+                    ListItem {
+                        visible: !newChat.groupMode && newChat.digits.length >= 6
+                        width: parent.width
+                        iconName: "message"
+                        text: qsTr("Chat with +%1").arg(newChat.digits)
+                        onClicked: app.api("POST", "newChat", { phone: newChat.digits }, (c, body, err) => {
+                            newChat.error = err
+                            if (!err)
+                                newChat.openChat(body)
+                        })
+                    }
+                    Repeater {
+                        model: newChat.matches
+                        delegate: ListItem {
+                            required property var modelData
+                            width: people.width
+                            text: modelData.name
+                            subtitle: modelData.phone
+                            selected: newChat.groupMode && newChat.picked.indexOf(modelData.id) >= 0
+                            onClicked: {
+                                if (newChat.groupMode) {
+                                    const i = newChat.picked.indexOf(modelData.id)
+                                    newChat.picked = i >= 0 ? newChat.picked.filter(p => p !== modelData.id) : newChat.picked.concat([modelData.id])
+                                } else {
+                                    newChat.openChat({ id: modelData.id, name: modelData.name, phone: modelData.phone })
+                                }
+                            }
+                        }
+                    }
+                    EmptyState {
+                        visible: newChat.matches.length === 0 && newChat.digits.length < 6
+                        iconName: "person"
+                        title: qsTr("No contacts")
+                        message: qsTr("Your contacts come from your main phone's address book: they arrive a few minutes after linking.")
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- photos and videos full screen -------------------------------------------------------
+    Rectangle {
+        id: viewer
+        property var item: null
+        function show(m) { item = m }
+        anchors.fill: parent
+        visible: item !== null
+        color: Theme.scrim
+        z: 10
+        Rectangle { anchors.fill: parent; color: Theme.background; opacity: 0.9 }
+        Image {
+            anchors.fill: parent
+            visible: viewer.item && viewer.item.type !== "video"
+            source: visible ? app.mediaUrl(viewer.item) : ""
+            fillMode: Image.PreserveAspectFit
+            asynchronous: true
+        }
+        VideoOutput {
+            id: video
+            anchors.fill: parent
+            visible: viewer.item && viewer.item.type === "video"
+        }
+        MediaPlayer {
+            id: videoPlayer
+            videoOutput: video
+            audioOutput: AudioOutput {}
+            source: viewer.item && viewer.item.type === "video" ? app.mediaUrl(viewer.item) : ""
+            onSourceChanged: if (source != "") play()
+        }
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {
+                videoPlayer.stop()
+                viewer.item = null
+            }
+        }
+        Text {
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 40
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width - 40
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            text: viewer.item ? viewer.item.body || "" : ""
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.bodySize
+            color: Theme.text
+        }
+    }
+
+    // ---- status updates, one after the other ------------------------------------------------
+    Rectangle {
+        id: storyViewer
+        property int person: -1
+        property int item: 0
+        readonly property var current: person >= 0 && person < app.statuses.length ? app.statuses[person] : null
+        readonly property var story: current ? current.items[item] : null
+        function show(index) {
+            person = index
+            item = 0
+            timer.restart()
+        }
+        function close() {
+            storyPlayer.stop()
+            person = -1
+        }
+        function next() {
+            if (!current)
+                return
+            if (item + 1 < current.items.length) {
+                item++
+            } else if (person + 1 < app.statuses.length) {
+                person++
+                item = 0
+            } else {
+                close()
+                return
+            }
+            timer.restart()
+        }
+        function previous() {
+            if (item > 0)
+                item--
+            else if (person > 0) {
+                person--
+                item = 0
+            }
+            timer.restart()
+        }
+        anchors.fill: parent
+        visible: current !== null
+        color: story && !story.hasMedia ? app.green : Theme.background
+        z: 11
+        Timer {
+            id: timer
+            interval: storyViewer.story && storyViewer.story.type === "video" ? Math.max(5, storyViewer.story.seconds || 15) * 1000 : 5000
+            running: storyViewer.visible
+            onTriggered: storyViewer.next()
+        }
+        Image {
+            anchors.fill: parent
+            visible: !!(storyViewer.story && storyViewer.story.hasMedia && storyViewer.story.type !== "video")
+            source: visible ? app.mediaUrl(storyViewer.story) : ""
+            fillMode: Image.PreserveAspectFit
+            asynchronous: true
+        }
+        VideoOutput { id: storyVideo; anchors.fill: parent; visible: !!(storyViewer.story && storyViewer.story.type === "video") }
+        MediaPlayer {
+            id: storyPlayer
+            videoOutput: storyVideo
+            audioOutput: AudioOutput {}
+            source: storyViewer.story && storyViewer.story.type === "video" ? app.mediaUrl(storyViewer.story) : ""
+            onSourceChanged: if (source != "") play()
+        }
+        Text {
+            anchors.centerIn: parent
+            width: parent.width - 60
+            visible: !!(storyViewer.story && storyViewer.story.body)
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            text: storyViewer.story ? storyViewer.story.body : ""
+            font.family: Theme.fontFamily
+            font.pixelSize: storyViewer.story && storyViewer.story.hasMedia ? Theme.bodySize : Theme.titleSize
+            font.weight: Font.DemiBold
+            color: storyViewer.story && !storyViewer.story.hasMedia ? Theme.accentText : Theme.text
+        }
+        // Progress, who and when
+        Row {
+            x: 10
+            y: Theme.statusBarHeight + 6
+            width: parent.width - 20
+            spacing: 4
+            Repeater {
+                model: storyViewer.current ? storyViewer.current.items.length : 0
+                delegate: Rectangle {
+                    required property int index
+                    width: (parent.width - 4 * ((storyViewer.current ? storyViewer.current.items.length : 1) - 1)) / Math.max(1, storyViewer.current ? storyViewer.current.items.length : 1)
+                    height: 3
+                    radius: 1.5
+                    color: index <= storyViewer.item ? Theme.text : Theme.separator
+                }
+            }
+        }
+        Row {
+            x: 14
+            y: Theme.statusBarHeight + 20
+            spacing: 10
+            Avatar {
+                size: 38
+                chatId: storyViewer.current ? storyViewer.current.id : ""
+                name: storyViewer.current ? storyViewer.current.name : ""
+            }
+            Column {
+                anchors.verticalCenter: parent.verticalCenter
+                Text {
+                    text: storyViewer.current ? (storyViewer.current.name || storyViewer.current.phone) : ""
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.bodySize
+                    font.weight: Font.DemiBold
+                    color: Theme.text
+                }
+                Text {
+                    text: storyViewer.story ? app.when(storyViewer.story.timestamp) : ""
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.captionSize
+                    color: Theme.textSecondary
+                }
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            anchors.topMargin: Theme.statusBarHeight + 70
+            onClicked: (m) => m.x < width / 3 ? storyViewer.previous() : storyViewer.next()
+            onPressAndHold: timer.stop()
+            onReleased: if (!timer.running && storyViewer.visible) timer.start()
+        }
+        IconButton {
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            y: Theme.statusBarHeight + 20
+            size: 38
+            iconName: "close"
+            onClicked: storyViewer.close()
         }
     }
 

@@ -13,7 +13,12 @@
 //
 //	GET  /state                       {status: starting|qr_ready|authenticating|ready|offline, qr, phone, name, error}
 //	POST /logout                      unlink this phone
-//	GET  /chats                       chats, pinned and most recent first
+//	GET  /chats                       chats, pinned and most recent first, with phone numbers
+//	GET  /contacts                    the address book of the main phone (synced), by name
+//	GET  /status                      status updates of the last day, by person
+//	GET  /channels                    channels followed; /channelMessages?id= their posts
+//	GET  /group?chatId=               a group's name, description and members
+//	POST /createGroup {name, participants: [id]}   POST /leaveGroup {chatId}
 //	GET  /messages?chatId=&limit=&before=  messages of a chat, oldest first
 //	GET  /search?q=                   messages containing text
 //	GET  /events?since=               waits (25 s at most) for what changed after event `since`
@@ -48,6 +53,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	_ "modernc.org/sqlite"
 )
 
@@ -192,7 +198,55 @@ func api(wa *WA, store *Store, hub *Hub, token string) http.Handler {
 		wa.Logout()
 		reply(w, map[string]bool{"ok": true}, nil)
 	})
-	mux.HandleFunc("GET /chats", func(w http.ResponseWriter, r *http.Request) { reply(w, store.Chats(), nil) })
+	mux.HandleFunc("GET /chats", func(w http.ResponseWriter, r *http.Request) {
+		type chatOut struct {
+			Chat
+			Phone string `json:"phone"`
+		}
+		out := []chatOut{}
+		for _, c := range store.Chats() {
+			if c.Name == "" && !c.IsGroup {
+				if jid, err := types.ParseJID(c.ID); err == nil {
+					c.Name = wa.nameOf(jid)
+				}
+			}
+			out = append(out, chatOut{Chat: c, Phone: wa.Phone(c.ID)})
+		}
+		reply(w, out, nil)
+	})
+	mux.HandleFunc("GET /contacts", func(w http.ResponseWriter, r *http.Request) {
+		list, err := wa.Contacts()
+		reply(w, list, err)
+	})
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) { reply(w, wa.Statuses(), nil) })
+	mux.HandleFunc("GET /channels", func(w http.ResponseWriter, r *http.Request) {
+		list, err := wa.Channels()
+		reply(w, list, err)
+	})
+	mux.HandleFunc("GET /channelMessages", func(w http.ResponseWriter, r *http.Request) {
+		list, err := wa.ChannelMessages(r.URL.Query().Get("id"))
+		reply(w, list, err)
+	})
+	mux.HandleFunc("GET /group", func(w http.ResponseWriter, r *http.Request) {
+		g, err := wa.GroupInfo(r.URL.Query().Get("chatId"))
+		reply(w, g, err)
+	})
+	mux.HandleFunc("POST /createGroup", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		var people []string
+		if list, ok := b["participants"].([]any); ok {
+			for _, p := range list {
+				if s, ok := p.(string); ok {
+					people = append(people, s)
+				}
+			}
+		}
+		c, err := wa.CreateGroup(str(b, "name"), people)
+		reply(w, c, err)
+	})
+	mux.HandleFunc("POST /leaveGroup", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, map[string]bool{"ok": true}, wa.LeaveGroup(str(body(r), "chatId")))
+	})
 	mux.HandleFunc("GET /messages", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 || limit > 200 {
