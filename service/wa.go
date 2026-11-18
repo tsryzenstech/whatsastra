@@ -262,6 +262,11 @@ func (w *WA) handle(evt any) {
 			w.store.SetChatState(e.JID.String(), e.Action.GetArchived(), false)
 			w.hub.Publish(Event{Kind: "chats"})
 		}
+	case *events.ChatPresence:
+		if !e.IsFromMe {
+			w.hub.Publish(Event{Kind: "typing", ChatID: e.Chat.ToNonAD().String(), Text: string(e.State),
+				IDs: []string{e.Sender.ToNonAD().String()}})
+		}
 	case *events.LoggedOut:
 		log.Printf("whatsapp: unlinked (%v)", e.Reason)
 	}

@@ -28,6 +28,7 @@ Rectangle {
     property string myPhone: ""
     property var chats: []
     property var statuses: []
+    property string about: ""
     property var channels: []
     property var contacts: []
     property int seq: 0
@@ -99,10 +100,12 @@ Rectangle {
             if (app.status === "ready") {
                 app.refreshChats()
                 app.refreshStatuses()
+                app.refreshAbout()
             }
         })
     }
     function refreshChats() { api("GET", "chats", null, (c, body, err) => { if (!err) app.chats = body || [] }) }
+    function refreshAbout() { api("GET", "profile", null, (c, body, err) => { if (!err && body) app.about = body.about || "" }) }
     function refreshStatuses() { api("GET", "status", null, (c, body, err) => { if (!err) app.statuses = body || [] }) }
     function refreshChannels() { api("GET", "channels", null, (c, body, err) => { if (!err) app.channels = body || [] }) }
     function refreshContacts() { api("GET", "contacts", null, (c, body, err) => { if (!err) app.contacts = body || [] }) }
@@ -122,6 +125,10 @@ Rectangle {
                 case "state": app.refreshState(); break
                 case "chats": chatsChanged = true; break
                 case "status": Qt.callLater(app.refreshStatuses); break
+                case "typing":
+                    if (app.openPage && e.chatId === app.openChat)
+                        app.openPage.typing(e.text === "composing")
+                    break
                 case "message":
                     chatsChanged = true
                     if (app.openPage && e.message.chatId === app.openChat)
@@ -424,6 +431,23 @@ Rectangle {
                     anchors.fill: parent
                     visible: app.tab === 1
                     title: qsTr("Status")
+                    ListGroup {
+                        ListItem {
+                            text: qsTr("My Status")
+                            subtitle: qsTr("Share a text for 24 hours")
+                            iconName: "edit"
+                            chevron: true
+                            onClicked: statusSheet.start()
+                        }
+                        ListItem {
+                            text: qsTr("About")
+                            subtitle: app.about !== "" ? app.about : qsTr("Tap to set")
+                            iconName: "person"
+                            chevron: true
+                            separator: false
+                            onClicked: aboutSheet.start()
+                        }
+                    }
                     EmptyState {
                         visible: app.statuses.length === 0
                         iconName: "sparkles"
@@ -671,6 +695,27 @@ Rectangle {
                 if (atEnd || m.fromMe)
                     Qt.callLater(list.positionViewAtEnd)
             }
+            // The other side is writing: shown under the name for a few seconds.
+            property bool theyType: false
+            function typing(on) {
+                theyType = on
+                if (on)
+                    typingOff.restart()
+            }
+            Timer { id: typingOff; interval: 7000; onTriggered: page.theyType = false }
+            // What the user does in the box is told to the chat, not on every key.
+            property bool iType: false
+            Timer {
+                id: iTypeOff
+                interval: 3000
+                onTriggered: page.setTyping(false)
+            }
+            function setTyping(on) {
+                if (page.channel || on === iType)
+                    return
+                iType = on
+                app.api("POST", "typing", { chatId: chat.id, on: on }, null)
+            }
             function change(e) {
                 messages = messages.map(m => {
                     if (!e.ids || e.ids.indexOf(m.id) < 0)
@@ -732,41 +777,37 @@ Rectangle {
                     page.sendError = err || ""
                 })
             }
+            property var menuMsg: null
             function messageMenu(m) {
-                const buttons = []
-                if (!channel)
-                    buttons.push({ id: "reply", label: qsTr("Reply") })
-                if (m.body)
-                    buttons.push({ id: "copy", label: qsTr("Copy") })
-                if (m.hasMedia)
-                    buttons.push({ id: "save", label: qsTr("Save to Files") })
-                if (!channel)
-                    for (const e of ["👍", "❤️", "😂", "😮", "😢", "🙏"])
-                        buttons.push({ id: "react:" + e, label: e })
-                if (!channel && m.fromMe && m.type !== "deleted" && Date.now() / 1000 - m.timestamp < 2 * 86400)
-                    buttons.push({ id: "revoke", label: qsTr("Delete for Everyone"), style: "destructive" })
-                buttons.push({ id: "cancel", label: qsTr("Cancel") })
-                Dialogs.show({ title: m.body ? m.body.substring(0, 80) : app.typeLabel(m.type), buttons: buttons }, function(answer) {
-                    if (answer === "reply") {
-                        page.replyTo = m
-                        input.forceActiveFocus()
-                    } else if (answer === "copy") {
-                        copier.text = m.body
-                        copier.selectAll()
-                        copier.copy()
-                    } else if (answer === "save") {
-                        Permissions.request("astra.permission.MEDIA", function(granted) {
-                            app.api("POST", "save", { chatId: m.chatId, id: m.id }, (code, body, err) => {
-                                page.sendError = err ? err : qsTr("Saved in Download/WhatsAstra")
-                            })
+                menuMsg = m
+                menuSheet.open()
+            }
+            function menuAction(answer) {
+                const m = menuMsg
+                menuSheet.close()
+                if (!m)
+                    return
+                if (answer === "reply") {
+                    page.replyTo = m
+                    input.forceActiveFocus()
+                } else if (answer === "copy") {
+                    copier.text = m.body
+                    copier.selectAll()
+                    copier.copy()
+                } else if (answer === "forward") {
+                    forwardSheet.start(m)
+                } else if (answer === "save") {
+                    Permissions.request("astra.permission.MEDIA", function(granted) {
+                        app.api("POST", "save", { chatId: m.chatId, id: m.id }, (code, body, err) => {
+                            page.sendError = err ? err : qsTr("Saved in Download/WhatsAstra")
                         })
-                    } else if (answer === "revoke") {
-                        app.api("POST", "revoke", { chatId: m.chatId, id: m.id }, null)
-                    } else if (answer && answer.indexOf("react:") === 0) {
-                        const emoji = answer.substring(6)
-                        app.api("POST", "react", { chatId: m.chatId, id: m.id, emoji: m.reaction === emoji ? "" : emoji }, null)
-                    }
-                })
+                    })
+                } else if (answer === "revoke") {
+                    app.api("POST", "revoke", { chatId: m.chatId, id: m.id }, null)
+                } else if (answer && answer.indexOf("react:") === 0) {
+                    const emoji = answer.substring(6)
+                    app.api("POST", "react", { chatId: m.chatId, id: m.id, emoji: m.reaction === emoji ? "" : emoji }, null)
+                }
             }
             Component.onCompleted: {
                 app.openChat = chat.id
@@ -1013,7 +1054,8 @@ Rectangle {
                     Text {
                         width: parent.width
                         elide: Text.ElideRight
-                        text: page.channel ? qsTr("Channel")
+                        text: page.theyType ? qsTr("typing\u2026")
+                            : page.channel ? qsTr("Channel")
                             : page.group ? qsTr("Group · tap for info")
                             : (page.live.name && page.live.phone ? page.live.phone : qsTr("WhatsApp"))
                         font.family: Theme.fontFamily
@@ -1102,6 +1144,14 @@ Rectangle {
                     height: 48
                     radius: 24
                     placeholder: qsTr("Message")
+                    onTextChanged: {
+                        if (text.trim() !== "") {
+                            page.setTyping(true)
+                            iTypeOff.restart()
+                        } else {
+                            page.setTyping(false)
+                        }
+                    }
                     onAccepted: page.send()
                 }
                 IconButton {
@@ -1110,6 +1160,83 @@ Rectangle {
                     color: input.text.trim() ? app.green : Theme.surfaceRaised
                     iconColor: input.text.trim() ? Theme.accentText : Theme.textSecondary
                     onClicked: page.send()
+                }
+            }
+
+            // What can be done with a message
+            Sheet {
+                id: menuSheet
+                title: page.menuMsg && page.menuMsg.body ? page.menuMsg.body.substring(0, 60) : (page.menuMsg ? app.typeLabel(page.menuMsg.type) : "")
+                Column {
+                    width: parent.width
+                    Row {
+                        visible: !page.channel && !!page.menuMsg && page.menuMsg.type !== "deleted"
+                        width: parent.width
+                        Repeater {
+                            model: ["\ud83d\udc4d", "\u2764\ufe0f", "\ud83d\ude02", "\ud83d\ude2e", "\ud83d\ude22", "\ud83d\ude4f"]
+                            delegate: Item {
+                                required property string modelData
+                                width: parent.width / 6
+                                height: 56
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: 46; height: 46; radius: 23
+                                    color: page.menuMsg && page.menuMsg.reaction === parent.modelData ? app.green : "transparent"
+                                }
+                                Text { anchors.centerIn: parent; text: parent.modelData; font.pixelSize: Theme.titleSize + 4 }
+                                MouseArea { anchors.fill: parent; onClicked: page.menuAction("react:" + parent.modelData) }
+                            }
+                        }
+                    }
+                    ListItem { visible: !page.channel; text: qsTr("Reply"); iconName: "reply"; onClicked: page.menuAction("reply") }
+                    ListItem { visible: !!page.menuMsg && !!page.menuMsg.body; text: qsTr("Copy"); iconName: "copy"; onClicked: page.menuAction("copy") }
+                    ListItem { visible: !!page.menuMsg && !!page.menuMsg.body && !page.channel; text: qsTr("Forward"); iconName: "forward"; onClicked: page.menuAction("forward") }
+                    ListItem { visible: !!page.menuMsg && !!page.menuMsg.hasMedia; text: qsTr("Save to Files"); iconName: "download"; onClicked: page.menuAction("save") }
+                    ListItem {
+                        visible: !page.channel && !!page.menuMsg && page.menuMsg.fromMe && page.menuMsg.type !== "deleted" && Date.now() / 1000 - page.menuMsg.timestamp < 2 * 86400
+                        text: qsTr("Delete for Everyone")
+                        iconName: "trash"
+                        destructive: true
+                        separator: false
+                        onClicked: page.menuAction("revoke")
+                    }
+                }
+            }
+            // Where to forward a message
+            Sheet {
+                id: forwardSheet
+                title: qsTr("Forward to")
+                property var msg: null
+                property string error: ""
+                function start(m) { msg = m; error = ""; open() }
+                Column {
+                    width: parent.width
+                    Text { visible: forwardSheet.error !== ""; width: parent.width; wrapMode: Text.Wrap; text: forwardSheet.error; font.family: Theme.fontFamily; font.pixelSize: Theme.captionSize; color: Theme.danger }
+                    Flickable {
+                        width: parent.width
+                        height: Math.min(contentHeight, 420)
+                        contentHeight: fcol.height
+                        clip: true
+                        Column {
+                            id: fcol
+                            width: parent.width
+                            Repeater {
+                                model: app.chats.filter(c => !c.archived && !String(c.id).endsWith("@newsletter")).slice(0, 60)
+                                delegate: ListItem {
+                                    required property var modelData
+                                    text: app.nameOf(modelData)
+                                    onClicked: app.api("POST", "forward", { chatId: forwardSheet.msg.chatId, id: forwardSheet.msg.id, to: modelData.id }, (c, body, err) => {
+                                        if (err) {
+                                            forwardSheet.error = err
+                                        } else {
+                                            forwardSheet.close()
+                                            page.sendError = qsTr("Forwarded to %1").arg(app.nameOf(modelData))
+                                        }
+                                    })
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1242,6 +1369,114 @@ Rectangle {
                                     stack.open(conversationPage, { chat: body })
                             })
                         }
+                        // Press and hold: what an admin can do with a member.
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: !modelData.me
+                            propagateComposedEvents: true
+                            onClicked: (m) => m.accepted = false
+                            onPressAndHold: Dialogs.show({ title: modelData.name || modelData.phone,
+                                                           buttons: [{ id: modelData.admin ? "demote" : "promote", label: modelData.admin ? qsTr("Remove as Admin") : qsTr("Make Admin") },
+                                                                     { id: "remove", label: qsTr("Remove from Group"), style: "destructive" },
+                                                                     { id: "cancel", label: qsTr("Cancel") }] },
+                                                         function(answer) {
+                                if (answer === "promote" || answer === "demote" || answer === "remove")
+                                    app.api("POST", "groupPeople", { chatId: gpage.chat.id, action: answer, people: [modelData.id || modelData.jid || modelData.phone.replace("+", "") + "@s.whatsapp.net"] }, (c, body, err) => {
+                                        gpage.message = err || ""
+                                        app.api("GET", "group?chatId=" + encodeURIComponent(gpage.chat.id), null, (c2, b2, e2) => { if (!e2) gpage.info = b2 })
+                                    })
+                            })
+                        }
+                    }
+                }
+            }
+            ListGroup {
+                visible: !!gpage.info
+                ListItem {
+                    text: qsTr("Change Name")
+                    iconName: "edit"
+                    chevron: true
+                    onClicked: groupEdit.start("name", gpage.info.name)
+                }
+                ListItem {
+                    text: qsTr("Change Description")
+                    iconName: "note"
+                    chevron: true
+                    onClicked: groupEdit.start("topic", gpage.info.topic)
+                }
+                ListItem {
+                    text: qsTr("Add People")
+                    iconName: "person-add"
+                    chevron: true
+                    separator: false
+                    onClicked: addPeople.start()
+                }
+            }
+            Sheet {
+                id: groupEdit
+                property string field: "name"
+                title: field === "name" ? qsTr("Group Name") : qsTr("Group Description")
+                function start(f, current) { field = f; edit.text = current || ""; open() }
+                Column {
+                    width: parent.width
+                    spacing: 12
+                    TextField { id: edit; width: parent.width; maximumLength: groupEdit.field === "name" ? 25 : 500; onAccepted: save.clicked() }
+                    Button {
+                        id: save
+                        width: parent.width
+                        text: qsTr("Save")
+                        enabled: groupEdit.field === "topic" || edit.text.trim() !== ""
+                        onClicked: app.api("POST", groupEdit.field === "name" ? "groupRename" : "groupTopic",
+                                           groupEdit.field === "name" ? { chatId: gpage.chat.id, name: edit.text } : { chatId: gpage.chat.id, topic: edit.text },
+                                           (c, body, err) => {
+                            if (err) {
+                                gpage.message = err
+                            } else {
+                                if (groupEdit.field === "name") gpage.info = Object.assign({}, gpage.info, { name: edit.text.trim() })
+                                else gpage.info = Object.assign({}, gpage.info, { topic: edit.text.trim() })
+                            }
+                            groupEdit.close()
+                        })
+                    }
+                }
+            }
+            Sheet {
+                id: addPeople
+                title: qsTr("Add People")
+                property var picked: []
+                function start() { picked = []; open() }
+                Column {
+                    width: parent.width
+                    spacing: 10
+                    Button {
+                        width: parent.width
+                        enabled: addPeople.picked.length > 0
+                        text: qsTr("Add (%1)").arg(addPeople.picked.length)
+                        onClicked: app.api("POST", "groupPeople", { chatId: gpage.chat.id, action: "add", people: addPeople.picked }, (c, body, err) => {
+                            gpage.message = err || ""
+                            addPeople.close()
+                            app.api("GET", "group?chatId=" + encodeURIComponent(gpage.chat.id), null, (c2, b2, e2) => { if (!e2) gpage.info = b2 })
+                        })
+                    }
+                    Flickable {
+                        width: parent.width
+                        height: Math.min(contentHeight, 380)
+                        contentHeight: pcol.height
+                        clip: true
+                        Column {
+                            id: pcol
+                            width: parent.width
+                            Repeater {
+                                model: app.contacts.filter(c => !gpage.info || !gpage.info.members.some(m => m.phone === c.phone)).slice(0, 100)
+                                delegate: ListItem {
+                                    required property var modelData
+                                    text: modelData.name
+                                    subtitle: modelData.phone
+                                    selected: addPeople.picked.indexOf(modelData.id) >= 0
+                                    onClicked: addPeople.picked = selected ? addPeople.picked.filter(x => x !== modelData.id) : addPeople.picked.concat([modelData.id])
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1264,6 +1499,57 @@ Rectangle {
                             })
                     })
                 }
+            }
+        }
+    }
+
+    // ---- my status and my about text -----------------------------------------------------------
+    Sheet {
+        id: statusSheet
+        title: qsTr("My Status")
+        property string error: ""
+        function start() { error = ""; statusText.text = ""; open() }
+        Column {
+            width: parent.width
+            spacing: 12
+            TextField { id: statusText; width: parent.width; placeholder: qsTr("What's on your mind?"); maximumLength: 700; onAccepted: share.clicked() }
+            Text { visible: statusSheet.error !== ""; width: parent.width; wrapMode: Text.Wrap; text: statusSheet.error; font.family: Theme.fontFamily; font.pixelSize: Theme.captionSize; color: Theme.danger }
+            Button {
+                id: share
+                width: parent.width
+                text: qsTr("Share")
+                enabled: statusText.text.trim() !== ""
+                onClicked: app.api("POST", "postStatus", { text: statusText.text }, (c, body, err) => {
+                    statusSheet.error = err
+                    if (!err) {
+                        statusSheet.close()
+                        app.refreshStatuses()
+                    }
+                })
+            }
+        }
+    }
+    Sheet {
+        id: aboutSheet
+        title: qsTr("About")
+        property string error: ""
+        function start() { error = ""; aboutText.text = app.about; open() }
+        Column {
+            width: parent.width
+            spacing: 12
+            TextField { id: aboutText; width: parent.width; placeholder: qsTr("Hey there! I am using WhatsAstra."); maximumLength: 139; onAccepted: saveAbout.clicked() }
+            Text { visible: aboutSheet.error !== ""; width: parent.width; wrapMode: Text.Wrap; text: aboutSheet.error; font.family: Theme.fontFamily; font.pixelSize: Theme.captionSize; color: Theme.danger }
+            Button {
+                id: saveAbout
+                width: parent.width
+                text: qsTr("Save")
+                onClicked: app.api("POST", "setAbout", { text: aboutText.text }, (c, body, err) => {
+                    aboutSheet.error = err
+                    if (!err) {
+                        app.about = aboutText.text.trim()
+                        aboutSheet.close()
+                    }
+                })
             }
         }
     }

@@ -22,6 +22,10 @@
 //	GET  /messages?chatId=&limit=&before=  messages of a chat, oldest first
 //	GET  /search?q=                   messages containing text
 //	GET  /events?since=               waits (25 s at most) for what changed after event `since`
+//	POST /typing {chatId, on}   POST /forward {chatId, id, to}   POST /postStatus {text}
+//	POST /groupRename {chatId, name}   POST /groupTopic {chatId, topic}
+//	POST /groupPeople {chatId, action: add|remove|promote|demote, people}
+//	GET  /profile   POST /setAbout {text}
 //	POST /send     {chatId, text, quoteId}
 //	POST /sendFile {chatId, path, caption, voice}
 //	POST /react    {chatId, id, emoji}
@@ -310,6 +314,46 @@ func api(wa *WA, store *Store, hub *Hub, token string) http.Handler {
 	mux.HandleFunc("POST /newChat", func(w http.ResponseWriter, r *http.Request) {
 		c, err := wa.NewChat(str(body(r), "phone"))
 		reply(w, c, err)
+	})
+	mux.HandleFunc("POST /typing", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		on, _ := b["on"].(bool)
+		reply(w, map[string]bool{"ok": true}, wa.Typing(str(b, "chatId"), on))
+	})
+	mux.HandleFunc("POST /groupRename", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		reply(w, map[string]bool{"ok": true}, wa.GroupRename(str(b, "chatId"), str(b, "name")))
+	})
+	mux.HandleFunc("POST /groupTopic", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		reply(w, map[string]bool{"ok": true}, wa.GroupTopic(str(b, "chatId"), str(b, "topic")))
+	})
+	mux.HandleFunc("POST /groupPeople", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		var people []string
+		if list, ok := b["people"].([]any); ok {
+			for _, p := range list {
+				if s, ok := p.(string); ok {
+					people = append(people, s)
+				}
+			}
+		}
+		reply(w, map[string]bool{"ok": true}, wa.GroupPeople(str(b, "chatId"), str(b, "action"), people))
+	})
+	mux.HandleFunc("POST /postStatus", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, map[string]bool{"ok": true}, wa.PostStatus(str(body(r), "text")))
+	})
+	mux.HandleFunc("POST /forward", func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		m, err := wa.Forward(str(b, "chatId"), str(b, "id"), str(b, "to"))
+		reply(w, m, err)
+	})
+	mux.HandleFunc("GET /profile", func(w http.ResponseWriter, r *http.Request) {
+		p, err := wa.Profile()
+		reply(w, p, err)
+	})
+	mux.HandleFunc("POST /setAbout", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, map[string]bool{"ok": true}, wa.SetAbout(str(body(r), "text")))
 	})
 	mux.HandleFunc("POST /deleteChat", func(w http.ResponseWriter, r *http.Request) {
 		chat := str(body(r), "chatId")
