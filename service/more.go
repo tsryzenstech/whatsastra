@@ -179,3 +179,36 @@ func (w *WA) SetAbout(text string) error {
 	}
 	return client.SetStatusMessage(context.Background(), types.SetStatusInput{Text: &text})
 }
+
+// PairPhone links this phone to a WhatsApp account by the account's phone number: WhatsApp
+// answers with a code of eight characters, which the user types on their main phone (WhatsApp >
+// Linked devices > Link a device > Link with phone number instead). It is the alternative to
+// scanning the QR code on the same phone. (It is not an SMS: a code by SMS registers a phone as
+// the account's main device, which only WhatsApp's own apps can do.)
+func (w *WA) PairPhone(phone string) (string, error) {
+	w.mu.Lock()
+	client := w.client
+	w.mu.Unlock()
+	if client == nil {
+		return "", errors.New("WhatsApp is not ready yet: wait a moment")
+	}
+	if client.Store.ID != nil {
+		return "", errors.New("this phone is linked already")
+	}
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, phone)
+	if len(digits) < 8 || len(digits) > 15 {
+		return "", errors.New("enter the number with its country code, like +39 333 1234567")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	code, err := client.PairPhone(ctx, digits, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+	if err != nil {
+		return "", err
+	}
+	return code, nil
+}

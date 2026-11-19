@@ -315,6 +315,10 @@ func api(wa *WA, store *Store, hub *Hub, token string) http.Handler {
 		c, err := wa.NewChat(str(body(r), "phone"))
 		reply(w, c, err)
 	})
+	mux.HandleFunc("POST /pairPhone", func(w http.ResponseWriter, r *http.Request) {
+		code, err := wa.PairPhone(str(body(r), "phone"))
+		reply(w, map[string]string{"code": code}, err)
+	})
 	mux.HandleFunc("POST /typing", func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
 		on, _ := b["on"].(bool)

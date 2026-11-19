@@ -21,6 +21,8 @@ Rectangle {
 
     property string base: ""            // http://127.0.0.1:<port>
     property string token: ""
+    property string pairCode: ""
+    property string pairError: ""
     property string status: "loading"   // loading starting qr_ready authenticating ready offline noservice
     property string error: ""
     property string qr: ""
@@ -180,9 +182,32 @@ Rectangle {
 
     // ---- helpers ------------------------------------------------------------------------
     function isGroup(id) { return String(id).endsWith("@g.us") }
+    // The names of the Contacts app, by phone number (digits only): what the user saved
+    // there comes before what WhatsApp knows of someone.
+    readonly property var addressBook: {
+        const map = {}
+        for (const c of (Contacts.state.contacts || [])) {
+            const list = c.phones || (c.phone ? [c.phone] : [])
+            for (const p of list) {
+                const d = String(p.number || p).replace(/[^0-9]/g, "")
+                if (d.length >= 7)
+                    map[d.slice(-9)] = c.name
+            }
+        }
+        return map
+    }
+    function contactName(id, phone) {
+        const d = String(phone || String(id).split("@")[0]).replace(/[^0-9]/g, "")
+        return d.length >= 7 ? (addressBook[d.slice(-9)] || "") : ""
+    }
     function nameOf(chat) {
         if (!chat)
             return ""
+        if (!app.isGroup(chat.id)) {
+            const saved = contactName(chat.id, chat.phone)
+            if (saved)
+                return saved
+        }
         return chat.name || chat.phone || "+" + String(chat.id).split("@")[0]
     }
     function initials(name) {
@@ -631,6 +656,72 @@ Rectangle {
                         }
                     }
                     Spinner { anchors.centerIn: parent; visible: app.qr === "" }
+                }
+            }
+            // The other way in: by the phone number, with a code typed on the main phone.
+            Card {
+                Column {
+                    width: parent.width
+                    spacing: 10
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: qsTr("Or link with your phone number")
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.bodySize
+                        font.weight: Font.DemiBold
+                        color: Theme.text
+                    }
+                    TextField {
+                        id: pairNumber
+                        width: parent.width
+                        placeholder: qsTr("Phone number with country code")
+                        inputMethodHints: Qt.ImhDialableCharactersOnly
+                        maximumLength: 20
+                        onAccepted: pairButton.clicked()
+                    }
+                    Button {
+                        id: pairButton
+                        width: parent.width
+                        text: qsTr("Get a code")
+                        enabled: pairNumber.text.replace(/[^0-9]/g, "").length >= 8
+                        onClicked: {
+                            app.pairError = ""
+                            app.api("POST", "pairPhone", { phone: pairNumber.text }, (code, body, err) => {
+                                app.pairError = err || ""
+                                app.pairCode = err ? "" : (body.code || "")
+                            })
+                        }
+                    }
+                    Text {
+                        visible: app.pairCode !== ""
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        text: app.pairCode.length === 8 ? app.pairCode.slice(0, 4) + "-" + app.pairCode.slice(4) : app.pairCode
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 34
+                        font.weight: Font.Bold
+                        font.letterSpacing: 2
+                        color: app.green
+                    }
+                    Text {
+                        visible: app.pairCode !== ""
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: qsTr("On your main phone: WhatsApp > Settings > Linked devices > Link a device > Link with phone number instead, and type this code. It stays valid for a few minutes.")
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.captionSize
+                        color: Theme.textSecondary
+                    }
+                    Text {
+                        visible: app.pairError !== ""
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: app.pairError
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.captionSize
+                        color: Theme.danger
+                    }
                 }
             }
             Text {
